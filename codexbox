@@ -79,6 +79,11 @@ script -q -f -c "podman run --rm -it \
     git clone --no-hardlinks /src \"\$WORKDIR\"
     cd \"\$WORKDIR\"
 
+    if [[ -f pyproject.toml ]]; then
+      echo \"[codexbox] Bootstrapping backend via uv...\"
+      uv sync --group dev --group lint
+    fi
+
     echo \"[codexbox] Running Codex in \$WORKDIR (host repo is read-only)\"
     codex --dangerously-bypass-approvals-and-sandbox
 
