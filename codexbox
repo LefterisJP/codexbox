@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: codexbox /path/to/repo [out_dir]"
+}
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 1
+fi
+
+REPO="$(realpath "$1")"
+OUT="${2:-$REPO/.codexbox-out}"
+mkdir -p "$OUT"
+
+# Host-side Codex OAuth token
+HOST_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+HOST_AUTH="$HOST_CODEX_HOME/auth.json"
+
+if [[ ! -f "$HOST_AUTH" ]]; then
+  echo "ERROR: Can't find auth.json at: $HOST_AUTH"
+  echo "Run once on host: codex login"
+  exit 1
+fi
+
+RUN_ID="$(date +%Y%m%d-%H%M%S)"
+PATCH_NAME="patch-$RUN_ID.diff"
+LOG_NAME="run-$RUN_ID.log"
+
+PATCH="$OUT/$PATCH_NAME"
+LOG="$OUT/$LOG_NAME"
+
+# Copy auth.json into the project output dir so we only mount that file, not your whole home.
+AUTH_IN_OUT="$OUT/auth.json"
+cp -f "$HOST_AUTH" "$AUTH_IN_OUT"
+chmod 600 "$AUTH_IN_OUT"
+
+# Container paths
+WORKDIR="/tmp/codexworkspace"
+CONTAINER_AUTH="/tmp/codex-auth/auth.json"   # mount target
+CODEX_HOME_IN_CONTAINER="/tmp/.codex"        # keep codex state in tmp
+
+# Codex flags
+CODEX_FLAGS=(--dangerously-bypass-approvals-and-sandbox)
+
+echo "Repo (host):  $REPO"
+echo "Out dir:      $OUT"
+echo "Patch file:   $PATCH"
+echo "Log file:     $LOG"
+echo "Workspace:    $WORKDIR"
+echo
+
+# Use `script` so Codex remains fully interactive while we log.
+script -q -f -c "podman run --rm -it \
+  --security-opt=no-new-privileges \
+  --cap-drop=all \
+  --userns=keep-id \
+  --network slirp4netns:allow_host_loopback=false \
+  -e CODEX_HOME=\"$CODEX_HOME_IN_CONTAINER\" \
+  -v \"$REPO\":/src:ro,Z \
+  -v \"$OUT\":/out:Z \
+  -v \"$AUTH_IN_OUT\":\"$CONTAINER_AUTH\":ro,Z \
+  codexbox:latest \
+  bash -lc '
+    set -euo pipefail
+
+    # Use fixed paths to avoid host-side variable expansion issues
+    WORKDIR=\"/tmp/codexworkspace\"
+    AUTH_SRC=\"/tmp/codex-auth/auth.json\"
+    CODEX_HOME_DIR=\"/tmp/.codex\"
+
+    mkdir -p \"\$CODEX_HOME_DIR\"
+    cp -f \"\$AUTH_SRC\" \"\$CODEX_HOME_DIR/auth.json\"
+    chmod 600 \"\$CODEX_HOME_DIR/auth.json\"
+
+    rm -rf \"\$WORKDIR\"
+    mkdir -p \"\$WORKDIR\"
+    git clone --no-hardlinks /src \"\$WORKDIR\"
+    cd \"\$WORKDIR\"
+
+    echo \"[codexbox] Running Codex in \$WORKDIR (host repo is read-only)\"
+    codex --dangerously-bypass-approvals-and-sandbox
+
+    echo \"[codexbox] Exporting patch to /out/$PATCH_NAME\"
+    git diff > \"/out/$PATCH_NAME\" || true
+  '" "$LOG"
+
+
+
+echo
+echo "Done."
+echo "Patch: $PATCH"
+echo "Log:   $LOG"
