@@ -1,76 +1,59 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage() {
-  echo "Usage: codexbox /path/to/repo [out_dir]"
-}
+usage() { echo "Usage: codexbox /path/to/repo [out_dir]"; }
 
-# ------------------------------- args ---------------------------------------
-
-if [[ $# -lt 1 ]]; then
-  usage
-  exit 1
-fi
+if [[ $# -lt 1 ]]; then usage; exit 1; fi
 
 REPO="$(realpath "$1")"
 OUT="${2:-$REPO/.codexbox-out}"
 mkdir -p "$OUT"
 
-# ------------------------------ host auth -----------------------------------
-
+# Host-side Codex OAuth token
 HOST_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 HOST_AUTH="$HOST_CODEX_HOME/auth.json"
-
 if [[ ! -f "$HOST_AUTH" ]]; then
   echo "ERROR: Can't find auth.json at: $HOST_AUTH"
   echo "Run once on host: codex login"
   exit 1
 fi
 
-# Copy auth.json into the project output dir so we only mount that file, not your whole home.
+# Helpers on host (single source of truth)
+HOST_HELPERS_DIR="$HOME/.codexbox/bin"
+if [[ ! -d "$HOST_HELPERS_DIR" ]]; then
+  echo "ERROR: Missing helpers dir: $HOST_HELPERS_DIR"
+  echo "Expected files: cb-export, cb-import"
+  exit 1
+fi
+if [[ ! -x "$HOST_HELPERS_DIR/cb-export" ]]; then
+  echo "ERROR: $HOST_HELPERS_DIR/cb-export is missing or not executable"
+  exit 1
+fi
+
+# Copy auth.json into outbox so we only mount that file
 AUTH_IN_OUT="$OUT/auth.json"
 cp -f "$HOST_AUTH" "$AUTH_IN_OUT"
 chmod 600 "$AUTH_IN_OUT"
 
-# ----------------------------- run metadata ---------------------------------
-
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
-PATCH_NAME="patch-$RUN_ID.diff"
-LOG_NAME="run-$RUN_ID.log"
-
-PATCH="$OUT/$PATCH_NAME"
-LOG="$OUT/$LOG_NAME"
-
-# --------------------------- container config -------------------------------
+LOG="$OUT/run-$RUN_ID.log"
 
 IMAGE="codexbox:latest"
 
-# Keep paths inside container fixed to avoid quote/expansion hell.
+# Fixed container paths
 C_WORKDIR="/tmp/codexworkspace"
 C_CODEX_HOME="/tmp/.codex"
 C_AUTH_SRC="/tmp/codex-auth/auth.json"
+C_HELPERS_DIR="/codexbox-bin"
 
-# Network: allow internet, block host loopback/LAN.
-NETWORK_ARGS=(--network "slirp4netns:allow_host_loopback=false")
+# Make PATH deterministic (don’t rely on whatever shells load)
+C_PATH="$C_HELPERS_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# Safety knobs (optional; adjust or remove)
-# LIMIT_ARGS=(--memory=12g --cpus=8 --pids-limit=4096)
-LIMIT_ARGS=()
+echo "Repo (host):  $REPO"
+echo "Out dir:      $OUT"
+echo "Log file:     $LOG"
+echo
 
-# Podman mounts
-MOUNT_ARGS=(
-  -v "$REPO:/src:ro,Z"
-  -v "$OUT:/out:Z"
-  -v "$AUTH_IN_OUT:$C_AUTH_SRC:ro,Z"
-)
-
-# Codex flags
-CODEX_FLAGS=(--dangerously-bypass-approvals-and-sandbox)
-
-# ------------------------------ container script ----------------------------
-
-# Everything between these markers is copied into the container and executed.
-# No host-side variable expansion happens here (single-quoted heredoc).
 CONTAINER_SCRIPT="$(cat <<'EOS'
 set -euo pipefail
 
@@ -78,7 +61,18 @@ WORKDIR="/tmp/codexworkspace"
 CODEX_HOME_DIR="/tmp/.codex"
 AUTH_SRC="/tmp/codex-auth/auth.json"
 
-echo "[codexbox] Preparing Codex auth + workspace..."
+# Force PATH inside the container script too (this is the key fix)
+export PATH="/codexbox-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Hard fail early if helpers aren’t visible
+if ! command -v cb-export >/dev/null 2>&1; then
+  echo "[codexbox] ERROR: cb-export not found on PATH"
+  echo "[codexbox] PATH=$PATH"
+  echo "[codexbox] Listing /codexbox-bin:"
+  ls -la /codexbox-bin || true
+  exit 1
+fi
+
 mkdir -p "$CODEX_HOME_DIR"
 cp -f "$AUTH_SRC" "$CODEX_HOME_DIR/auth.json"
 chmod 600 "$CODEX_HOME_DIR/auth.json"
@@ -88,135 +82,47 @@ mkdir -p "$WORKDIR"
 git clone --no-hardlinks /src "$WORKDIR"
 cd "$WORKDIR"
 
-# Optional bootstrap for rotki backend
+# rotki-style uv bootstrap when possible, fallback for generic projects
 if [[ -f pyproject.toml ]] && command -v uv >/dev/null 2>&1; then
   echo "[codexbox] Bootstrapping python env via uv..."
-
-  # rotki-style first
   if uv sync --group dev --group lint; then
-    echo "[codexbox] uv sync (dev+lint) OK"
+    :
   else
-    echo "[codexbox] uv sync (dev+lint) failed; falling back to plain 'uv sync'"
-    if uv sync; then
-      echo "[codexbox] uv sync OK"
-    else
-      echo "[codexbox] uv sync failed; continuing without bootstrap"
-    fi
+    echo "[codexbox] uv groups not available; falling back to 'uv sync'"
+    uv sync || true
   fi
 fi
 
-
-# ---------------------------------------------------------------------------
-# Shared host bridge for iterative workflow (works with new/untracked files)
-# ---------------------------------------------------------------------------
+# Shared host bridge repo for iterative sync
 git init --bare /out/host.git 2>/dev/null || true
 git remote add host /out/host.git 2>/dev/null || true
 
-BIN_DIR="/tmp/codexbox-bin"
-mkdir -p "$BIN_DIR"
+echo "[codexbox] Helpers ready: cb-export, cb-import"
+echo "[codexbox] Tip: use 'cb-export \"msg\"' any time to sync work to host."
 
-cat > "$BIN_DIR/cb-export" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-MSG="${*:-codexbox export}"
-
-# Ensure we have an initial commit for brand-new projects
-if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
-  git add -A
-  git commit -m "init" >/dev/null 2>&1 || true
-fi
-
-git add -A
-git commit -m "$MSG" >/dev/null 2>&1 || true
-git push -u host HEAD:codex
-
-echo "[cb-export] Pushed to host branch 'codex' in /out/host.git"
-EOF
-chmod +x "$BIN_DIR/cb-export"
-
-cat > "$BIN_DIR/cb-import" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-git fetch host
-
-if ! git show-ref --verify --quiet refs/remotes/host/codex; then
-  echo "[cb-import] No host/codex branch yet."
-  exit 0
-fi
-
-git merge --ff --no-edit host/codex || true
-echo "[cb-import] Merged host/codex into current branch"
-EOF
-chmod +x "$BIN_DIR/cb-import"
-
-export PATH="$BIN_DIR:$PATH"
-
-cat > .CODEXBOX_CONTEXT.md <<'EOF'
-# Codexbox context
-
-You are running inside a rootless Podman container.
-
-Facts:
-- Host repo is mounted read-only at /src.
-- You are working in a writable clone at /tmp/codexworkspace.
-- Persisted outputs must be written to /out (host-mounted).
-- Network: internet allowed; localhost/LAN blocked.
-
-Helpers:
-- cb-export "msg"  -> stage all, commit, push to host branch "codex" in /out/host.git
-- cb-import        -> fetch+merge host/codex into current branch
-
-When finishing:
-- Ensure changes are present in git diff (tracked files).
-- A patch export will be written automatically after Codex exits.
-EOF
-
-echo "[codexbox] Ready."
-echo "[codexbox] Workspace: $WORKDIR"
-echo "[codexbox] Helpers: cb-export \"msg\" , cb-import"
-echo "[codexbox] Context:  .CODEXBOX_CONTEXT.md"
-
-# Launch Codex
 exec codex --dangerously-bypass-approvals-and-sandbox
 EOS
 )"
 
-# ------------------------------- run ----------------------------------------
-
-echo "Repo (host):  $REPO"
-echo "Out dir:      $OUT"
-echo "Patch file:   $PATCH"
-echo "Log file:     $LOG"
-echo "Workspace:    $C_WORKDIR"
-echo
-
-# Keep Codex interactive while logging with `script`.
-# Note: no host-side expansion inside CONTAINER_SCRIPT.
+# Keep Codex interactive while logging
 script -q -f -c "
 podman run --rm -it \
   --security-opt=no-new-privileges \
   --cap-drop=all \
   --userns=keep-id \
-  ${NETWORK_ARGS[*]} \
-  ${LIMIT_ARGS[*]} \
+  --network slirp4netns:allow_host_loopback=false \
   -e CODEX_HOME=$C_CODEX_HOME \
-  ${MOUNT_ARGS[*]} \
+  -e PATH=$C_PATH \
+  -v \"$REPO\":/src:ro,Z \
+  -v \"$OUT\":/out:Z \
+  -v \"$AUTH_IN_OUT\":\"$C_AUTH_SRC\":ro,Z \
+  -v "$HOME/.codexbox/bin/cb-export:/usr/local/bin/cb-export:ro,Z" \
+  -v "$HOME/.codexbox/bin/cb-import:/usr/local/bin/cb-import:ro,Z" \
   $IMAGE \
   bash -lc $(printf '%q' "$CONTAINER_SCRIPT")
 " "$LOG"
 
-# If Codex exited normally, export a patch as a fallback artifact.
-# (This won't include untracked files. Use cb-export/host.git for that.)
-if podman run --rm -t \
-  ${NETWORK_ARGS[*]} \
-  ${MOUNT_ARGS[*]} \
-  $IMAGE \
-  bash -lc "cd '$C_WORKDIR' 2>/dev/null && git diff > '/out/$PATCH_NAME' || true" >/dev/null 2>&1; then
-  :
-fi
-
 echo
 echo "Done."
-echo "Patch: $PATCH"
 echo "Log:   $LOG"
-echo "Host bridge repo (for iterative sync): $OUT/host.git"
+echo "Host bridge repo: $OUT/host.git"

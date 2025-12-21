@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MSG="${*:-codexbox export}"
+
+# Ensure git identity exists (avoid silent commit failures)
+git config user.email >/dev/null 2>&1 || git config user.email "codexbox@local"
+git config user.name  >/dev/null 2>&1 || git config user.name  "codexbox"
+
+# Ensure the shared host remote exists
+git remote get-url host >/dev/null 2>&1 || git remote add host /out/host.git
+
+# Ensure there is at least one commit so pushing is consistent for new projects
+if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+  git add -A
+  if ! git diff --cached --quiet; then
+    git commit -m "init"
+  else
+    git commit --allow-empty -m "init"
+  fi
+fi
+
+# Stage everything (includes untracked)
+git add -A
+
+# Commit only if there are staged changes
+if ! git diff --cached --quiet; then
+  git commit -m "$MSG"
+else
+  echo "[cb-export] No staged changes; not creating a commit."
+fi
+
+# Push current HEAD to host branch "codex"
+git push -u host HEAD:codex
+
+echo "[cb-export] Exported to /out/host.git (branch: codex)"

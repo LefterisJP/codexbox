@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+git remote get-url host >/dev/null 2>&1 || git remote add host /out/host.git
+git fetch host
+
+if ! git show-ref --verify --quiet refs/remotes/host/codex; then
+  echo "[cb-import] No host/codex branch yet."
+  exit 0
+fi
+
+# Merge (safer than rebase for an agent)
+git merge --ff --no-edit host/codex || true
+
+echo "[cb-import] Merged host/codex into current branch"

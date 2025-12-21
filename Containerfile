@@ -1,6 +1,6 @@
 FROM node:lts-bookworm
 
-# System deps you will actually need for python packages that compile wheels
+# System deps + Python toolchain prerequisites
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git ca-certificates curl bash \
     python3 python3-venv python3-pip python3-dev \
@@ -9,19 +9,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep less \
   && rm -rf /var/lib/apt/lists/*
 
-# Install Codex CLI
+# Codex CLI
 RUN npm i -g @openai/codex
 
-# pnpm: rotki docs recommend using the version pinned in frontend/package.json via corepack
+# pnpm via corepack (rotki docs)
 RUN corepack enable
 
-# uv: rotki docs recommend the Astral installer
+# uv (rotki docs)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
   && install -m 0755 /root/.local/bin/uv /usr/local/bin/uv
 
-# Non-root user
 USER node
 WORKDIR /home/node
-
-# Convenience PATH
 ENV PATH="/usr/local/bin:/home/node/.local/bin:${PATH}"
