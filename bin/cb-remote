@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO="${1:-.}"
+REPO="$(realpath "$REPO")"
+OUT="$REPO/.codexbox-out"
+BRIDGE="$OUT/host.git"
+
+if [[ ! -d "$BRIDGE" ]]; then
+  echo "[codexbox] No bridge repo found at:"
+  echo "  $BRIDGE"
+  echo "Run 'codexbox .' once first."
+  exit 1
+fi
+
+cd "$REPO"
+
+# Add remote if missing
+git remote add codexbox "$BRIDGE" 2>/dev/null || true
+git fetch codexbox
+
+echo "[codexbox] Remote 'codexbox' is set."
+echo
+echo "To inspect Codex output:"
+echo "  git switch -C codexbox-work codexbox/codex"
+echo
+echo "Then merge/cherry-pick as you like."

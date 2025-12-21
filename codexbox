@@ -1,42 +1,92 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage() { echo "Usage: codexbox /path/to/repo [out_dir]"; }
+# ---------------------------------------------------------------------------
+# codexbox: host entrypoint + subcommand dispatcher
+#
+# Usage:
+#   codexbox /path/to/repo [out_dir]    # run Codex container
+#   codexbox remote [path/to/repo]      # add/fetch host remote pointing to .codexbox-out/host.git
+#   codexbox pull   [path/to/repo]      # fetch + switch -C codexbox-work codexbox/codex
+# ---------------------------------------------------------------------------
 
-if [[ $# -lt 1 ]]; then usage; exit 1; fi
+CODEXBOX_HOME="${CODEXBOX_HOME:-$HOME/.codexbox}"
+BIN_DIR="$CODEXBOX_HOME/bin"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  codexbox /path/to/repo [out_dir]
+  codexbox remote [path/to/repo]
+  codexbox pull   [path/to/repo]
+EOF
+}
+
+# --------------------------- subcommand dispatcher --------------------------
+
+cmd="${1:-}"
+
+case "$cmd" in
+  remote)
+    shift
+    [[ -x "$BIN_DIR/cb-remote" ]] || die "Missing or non-executable: $BIN_DIR/cb-remote"
+    exec "$BIN_DIR/cb-remote" "${1:-.}"
+    ;;
+  pull)
+    shift
+    [[ -x "$BIN_DIR/cb-pull" ]] || die "Missing or non-executable: $BIN_DIR/cb-pull"
+    exec "$BIN_DIR/cb-pull" "${1:-.}"
+    ;;
+  ""|-h|--help|help)
+    usage
+    exit 0
+    ;;
+esac
+
+# If we didn't match a subcommand, we treat the first arg as a repo path.
+# ------------------------------ args ----------------------------------------
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 1
+fi
 
 REPO="$(realpath "$1")"
 OUT="${2:-$REPO/.codexbox-out}"
 mkdir -p "$OUT"
 
-# Host-side Codex OAuth token
+# ------------------------------ host auth -----------------------------------
+
 HOST_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 HOST_AUTH="$HOST_CODEX_HOME/auth.json"
-if [[ ! -f "$HOST_AUTH" ]]; then
-  echo "ERROR: Can't find auth.json at: $HOST_AUTH"
-  echo "Run once on host: codex login"
-  exit 1
-fi
-
-# Helpers on host (single source of truth)
-HOST_HELPERS_DIR="$HOME/.codexbox/bin"
-if [[ ! -d "$HOST_HELPERS_DIR" ]]; then
-  echo "ERROR: Missing helpers dir: $HOST_HELPERS_DIR"
-  echo "Expected files: cb-export, cb-import"
-  exit 1
-fi
-if [[ ! -x "$HOST_HELPERS_DIR/cb-export" ]]; then
-  echo "ERROR: $HOST_HELPERS_DIR/cb-export is missing or not executable"
-  exit 1
-fi
+[[ -f "$HOST_AUTH" ]] || die "Can't find auth.json at: $HOST_AUTH (run: codex login)"
 
 # Copy auth.json into outbox so we only mount that file
 AUTH_IN_OUT="$OUT/auth.json"
 cp -f "$HOST_AUTH" "$AUTH_IN_OUT"
 chmod 600 "$AUTH_IN_OUT"
 
+# ------------------------- helpers to mount into container ------------------
+
+# Container-side helper scripts are on the host here:
+#   ~/.codexbox/bin/cb-export
+#   ~/.codexbox/bin/cb-import
+#
+# We mount them directly into /usr/local/bin so PATH does not matter.
+HOST_CB_EXPORT="$BIN_DIR/cb-export"
+HOST_CB_IMPORT="$BIN_DIR/cb-import"
+
+[[ -x "$HOST_CB_EXPORT" ]] || die "Missing or non-executable: $HOST_CB_EXPORT"
+[[ -x "$HOST_CB_IMPORT" ]] || die "Missing or non-executable: $HOST_CB_IMPORT"
+
+# ----------------------------- run metadata ---------------------------------
+
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 LOG="$OUT/run-$RUN_ID.log"
+
+# --------------------------- container config -------------------------------
 
 IMAGE="codexbox:latest"
 
@@ -44,16 +94,14 @@ IMAGE="codexbox:latest"
 C_WORKDIR="/tmp/codexworkspace"
 C_CODEX_HOME="/tmp/.codex"
 C_AUTH_SRC="/tmp/codex-auth/auth.json"
-C_HELPERS_DIR="/codexbox-bin"
-
-# Make PATH deterministic (don’t rely on whatever shells load)
-C_PATH="$C_HELPERS_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 echo "Repo (host):  $REPO"
 echo "Out dir:      $OUT"
 echo "Log file:     $LOG"
 echo
 
+# Minimal container script: prep auth, clone, bootstrap, then run Codex.
+# No fancy quoting tricks inside; we use a single-quoted heredoc and pass it safely.
 CONTAINER_SCRIPT="$(cat <<'EOS'
 set -euo pipefail
 
@@ -61,15 +109,10 @@ WORKDIR="/tmp/codexworkspace"
 CODEX_HOME_DIR="/tmp/.codex"
 AUTH_SRC="/tmp/codex-auth/auth.json"
 
-# Force PATH inside the container script too (this is the key fix)
-export PATH="/codexbox-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-# Hard fail early if helpers aren’t visible
+# Sanity: helper commands must exist
 if ! command -v cb-export >/dev/null 2>&1; then
-  echo "[codexbox] ERROR: cb-export not found on PATH"
-  echo "[codexbox] PATH=$PATH"
-  echo "[codexbox] Listing /codexbox-bin:"
-  ls -la /codexbox-bin || true
+  echo "[codexbox] ERROR: cb-export not found (expected at /usr/local/bin/cb-export)"
+  ls -la /usr/local/bin/cb-export /usr/local/bin/cb-import || true
   exit 1
 fi
 
@@ -97,9 +140,7 @@ fi
 git init --bare /out/host.git 2>/dev/null || true
 git remote add host /out/host.git 2>/dev/null || true
 
-echo "[codexbox] Helpers ready: cb-export, cb-import"
-echo "[codexbox] Tip: use 'cb-export \"msg\"' any time to sync work to host."
-
+echo "[codexbox] Ready. Use: cb-export \"msg\" to sync to host."
 exec codex --dangerously-bypass-approvals-and-sandbox
 EOS
 )"
@@ -112,12 +153,11 @@ podman run --rm -it \
   --userns=keep-id \
   --network slirp4netns:allow_host_loopback=false \
   -e CODEX_HOME=$C_CODEX_HOME \
-  -e PATH=$C_PATH \
   -v \"$REPO\":/src:ro,Z \
   -v \"$OUT\":/out:Z \
   -v \"$AUTH_IN_OUT\":\"$C_AUTH_SRC\":ro,Z \
-  -v "$HOME/.codexbox/bin/cb-export:/usr/local/bin/cb-export:ro,Z" \
-  -v "$HOME/.codexbox/bin/cb-import:/usr/local/bin/cb-import:ro,Z" \
+  -v \"$HOST_CB_EXPORT\":/usr/local/bin/cb-export:ro,Z \
+  -v \"$HOST_CB_IMPORT\":/usr/local/bin/cb-import:ro,Z \
   $IMAGE \
   bash -lc $(printf '%q' "$CONTAINER_SCRIPT")
 " "$LOG"

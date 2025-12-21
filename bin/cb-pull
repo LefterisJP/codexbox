@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO="${1:-.}"
+REPO="$(realpath "$REPO")"
+
+cd "$REPO"
+
+git remote add codexbox .codexbox-out/host.git 2>/dev/null || true
+git fetch codexbox
+git switch -C codexbox-work codexbox/codex
+
+echo "[codexbox] Switched to codexbox-work (latest Codex output)"

@@ -244,14 +244,24 @@ git clone .codexbox-out/host.git /tmp/codex-export
 cd /tmp/codex-export
 git checkout codex
 
+## Host helpers
 
-## Why this exists (tl;dr)
+codexbox provides host-side helpers as subcommands.
 
-Codex without autonomy is a toy.
-Codex with autonomy on your host is dangerous.
+### Set up / refresh the Codex remote
 
-This setup is the middle ground:
-**useful, fast, and contained**.
+```bash
+codexbox remote
+```
 
-If future-you wonders “why not just run it locally?”
-this README is your answer.
+Adds a git remote named codexbox pointing to .codexbox-out/host.git
+and fetches the latest changes.
+
+### Pull latest Codex changes into a branch
+
+```bash
+codexbox pull
+```
+
+Creates/resets branch codexbox-work to the latest Codex output.
+From there, merge or cherry-pick as desired.
