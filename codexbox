@@ -89,10 +89,22 @@ git clone --no-hardlinks /src "$WORKDIR"
 cd "$WORKDIR"
 
 # Optional bootstrap for rotki backend
-if [[ -f pyproject.toml ]]; then
-  echo "[codexbox] Bootstrapping backend: uv sync --group dev --group lint"
-  uv sync --group dev --group lint
+if [[ -f pyproject.toml ]] && command -v uv >/dev/null 2>&1; then
+  echo "[codexbox] Bootstrapping python env via uv..."
+
+  # rotki-style first
+  if uv sync --group dev --group lint; then
+    echo "[codexbox] uv sync (dev+lint) OK"
+  else
+    echo "[codexbox] uv sync (dev+lint) failed; falling back to plain 'uv sync'"
+    if uv sync; then
+      echo "[codexbox] uv sync OK"
+    else
+      echo "[codexbox] uv sync failed; continuing without bootstrap"
+    fi
+  fi
 fi
+
 
 # ---------------------------------------------------------------------------
 # Shared host bridge for iterative workflow (works with new/untracked files)
