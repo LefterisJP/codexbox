@@ -223,6 +223,28 @@ If you want to add more tools:
 
 ---
 
+## Iterative workflow (mid-session sync, including new/untracked files)
+
+codexbox creates a shared bare git repo at:
+
+- inside container: `/out/host.git`
+- on host: `<repo>/.codexbox-out/host.git`
+
+Inside the container, two helper commands exist:
+
+- `cb-export "message"`: stages all files (including new ones), commits, pushes to host branch `codex`
+- `cb-import`: fetches `host/codex` and merges it into the current branch
+
+### Pull changes onto the host (any time)
+
+From the host, to check out what Codex exported:
+
+```bash
+git clone .codexbox-out/host.git /tmp/codex-export
+cd /tmp/codex-export
+git checkout codex
+
+
 ## Why this exists (tl;dr)
 
 Codex without autonomy is a toy.
