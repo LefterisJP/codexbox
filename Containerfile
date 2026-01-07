@@ -1,4 +1,4 @@
-FROM node:lts-bookworm
+FROM node:lts-bookworm AS base
 
 ENV CARGO_HOME=/home/node/.cargo \
     RUSTUP_HOME=/home/node/.rustup
@@ -12,9 +12,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep less \
   && rm -rf /var/lib/apt/lists/*
 
-# Codex CLI
+# Codex CLI (common for all profiles)
 RUN npm i -g @openai/codex
 
+WORKDIR /home/node
+ENV PATH="/home/node/.cargo/bin:/usr/local/bin:/home/node/.local/bin:${PATH}"
+USER node
+
+# ---------------------------------------------------------------------------
+# rotki profile: extends base with pnpm/corepack, uv and rustup
+# Build with: podman build -t codexbox:rotki -f Containerfile --target rotki
+# ---------------------------------------------------------------------------
+FROM base AS rotki
+
+USER root
 # pnpm via corepack (rotki docs)
 RUN corepack enable
 
@@ -22,9 +33,6 @@ RUN corepack enable
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
   && install -m 0755 /root/.local/bin/uv /usr/local/bin/uv
 
-# Latest Rust toolchain for Ruff + custom tools (install under node home)
 USER node
+# Latest Rust toolchain for Ruff + custom tools (install under node home)
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
-
-WORKDIR /home/node
-ENV PATH="/home/node/.cargo/bin:/usr/local/bin:/home/node/.local/bin:${PATH}"

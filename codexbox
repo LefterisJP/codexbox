@@ -5,7 +5,7 @@ set -euo pipefail
 # codexbox: host entrypoint + subcommand dispatcher
 #
 # Usage:
-#   codexbox /path/to/repo [out_dir]    # run Codex container
+#   codexbox [--profile name] /path/to/repo [out_dir]    # run Codex container
 #   codexbox remote [path/to/repo]      # add/fetch host remote pointing to .codexbox-out/host.git
 #   codexbox pull   [path/to/repo]      # fetch + switch -C codexbox-work codexbox/codex
 # ---------------------------------------------------------------------------
@@ -18,9 +18,12 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  codexbox /path/to/repo [out_dir]
+  codexbox [--profile name] /path/to/repo [out_dir]
   codexbox remote [path/to/repo]
   codexbox pull   [path/to/repo]
+
+Options:
+  --profile name    Choose profile (default: rotki). Can also set CODEXBOX_PROFILE env
 EOF
 }
 
@@ -47,6 +50,45 @@ esac
 
 # If we didn't match a subcommand, we treat the first arg as a repo path.
 # ------------------------------ args ----------------------------------------
+
+PROFILE_OVERRIDE=""
+POSITIONAL=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --profile)
+      shift
+      [[ $# -gt 0 ]] || die "--profile requires a value"
+      PROFILE_OVERRIDE="$1"
+      shift
+      continue
+      ;;
+    --profile=*)
+      PROFILE_OVERRIDE="${1#*=}"
+      shift
+      continue
+      ;;
+    --)
+      shift
+      POSITIONAL+=("$@")
+      break
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      die "Unknown option: $1"
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      continue
+      ;;
+  esac
+done
+
+set -- "${POSITIONAL[@]}"
 
 if [[ $# -lt 1 ]]; then
   usage
@@ -86,9 +128,59 @@ HOST_CB_IMPORT="$BIN_DIR/cb-import"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 LOG="$OUT/run-$RUN_ID.log"
 
-# --------------------------- container config -------------------------------
+# --------------------------- profile config ---------------------------------
 
-IMAGE="codexbox:latest"
+PROFILE_DIR="$CODEXBOX_HOME/profiles"
+
+config_profile=""
+CONFIG_FILE="$REPO/.codexbox/config"
+if [[ -f "$CONFIG_FILE" ]]; then
+  config_profile="$(awk -F '=' '
+    /^[[:space:]]*#/ {next}
+    /^[[:space:]]*profile[[:space:]]*=/ {
+      val=$2
+      sub(/#.*/, "", val)
+      sub(/^[[:space:]]*/, "", val)
+      sub(/[[:space:]]*$/, "", val)
+      print val
+      exit
+    }
+  ' "$CONFIG_FILE")"
+fi
+
+PROFILE_NAME="$PROFILE_OVERRIDE"
+[[ -z "$PROFILE_NAME" ]] && PROFILE_NAME="${CODEXBOX_PROFILE:-}"
+[[ -z "$PROFILE_NAME" ]] && PROFILE_NAME="$config_profile"
+PROFILE_NAME="${PROFILE_NAME:-rotki}"
+
+PROFILE_FILE="$PROFILE_DIR/$PROFILE_NAME.sh"
+[[ -f "$PROFILE_FILE" ]] || die "Unknown profile '$PROFILE_NAME' (expected $PROFILE_FILE)"
+
+# shellcheck source=/dev/null
+source "$PROFILE_FILE"
+
+PROFILE_IMAGE="${PROFILE_IMAGE:-}"
+[[ -n "$PROFILE_IMAGE" ]] || die "Profile '$PROFILE_NAME' did not set PROFILE_IMAGE"
+
+PROFILE_BOOTSTRAP="${PROFILE_BOOTSTRAP:-}"
+[[ -n "$PROFILE_BOOTSTRAP" ]] || die "Profile '$PROFILE_NAME' did not set PROFILE_BOOTSTRAP"
+[[ -x "$PROFILE_BOOTSTRAP" ]] || die "Bootstrap script not executable: $PROFILE_BOOTSTRAP"
+
+if ! declare -p PROFILE_PODMAN_OPTS >/dev/null 2>&1; then
+  PROFILE_PODMAN_OPTS=()
+fi
+
+C_PROFILE_BOOTSTRAP="/usr/local/bin/cb-profile-bootstrap"
+PROFILE_PODMAN_ARGS_STR=""
+for arg in "${PROFILE_PODMAN_OPTS[@]}"; do
+  PROFILE_PODMAN_ARGS_STR+=" $(printf '%q' "$arg")"
+done
+
+echo "Profile:    $PROFILE_NAME"
+echo "Image:      $PROFILE_IMAGE"
+echo "Bootstrap:  $PROFILE_BOOTSTRAP"
+
+# --------------------------- container config -------------------------------
 
 # Fixed container paths
 C_WORKDIR="/tmp/codexworkspace"
@@ -125,15 +217,12 @@ mkdir -p "$WORKDIR"
 git clone --no-hardlinks /src "$WORKDIR"
 cd "$WORKDIR"
 
-# rotki-style uv bootstrap when possible, fallback for generic projects
-if [[ -f pyproject.toml ]] && command -v uv >/dev/null 2>&1; then
-  echo "[codexbox] Bootstrapping python env via uv..."
-  if uv sync --group dev --group lint; then
-    :
-  else
-    echo "[codexbox] uv groups not available; falling back to 'uv sync'"
-    uv sync || true
-  fi
+BOOTSTRAP_SCRIPT="${CODEXBOX_BOOTSTRAP:-/usr/local/bin/cb-profile-bootstrap}"
+if [[ -x "$BOOTSTRAP_SCRIPT" ]]; then
+  echo "[codexbox] Running profile bootstrap: $BOOTSTRAP_SCRIPT"
+  "$BOOTSTRAP_SCRIPT"
+else
+  echo "[codexbox] Bootstrap script not found or not executable: $BOOTSTRAP_SCRIPT"
 fi
 
 # Shared host bridge repo for iterative sync
@@ -153,12 +242,15 @@ podman run --rm -it \
   --userns=keep-id \
   --network slirp4netns:allow_host_loopback=false \
   -e CODEX_HOME=$C_CODEX_HOME \
+  -e CODEXBOX_BOOTSTRAP=$C_PROFILE_BOOTSTRAP \
   -v \"$REPO\":/src:ro,Z \
   -v \"$OUT\":/out:Z \
   -v \"$AUTH_IN_OUT\":\"$C_AUTH_SRC\":ro,Z \
   -v \"$HOST_CB_EXPORT\":/usr/local/bin/cb-export:ro,Z \
   -v \"$HOST_CB_IMPORT\":/usr/local/bin/cb-import:ro,Z \
-  $IMAGE \
+  -v \"$PROFILE_BOOTSTRAP\":\"$C_PROFILE_BOOTSTRAP\":ro,Z \
+  $PROFILE_PODMAN_ARGS_STR \
+  $(printf '%q' "$PROFILE_IMAGE") \
   bash -lc $(printf '%q' "$CONTAINER_SCRIPT")
 " "$LOG"
 
