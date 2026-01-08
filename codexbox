@@ -99,6 +99,27 @@ REPO="$(realpath "$1")"
 OUT="${2:-$REPO/.codexbox-out}"
 mkdir -p "$OUT"
 
+# Capture host git identity so the container inherits it
+HOST_GIT_NAME=""
+if ! HOST_GIT_NAME="$(git -C "$REPO" config user.name 2>/dev/null)"; then
+  HOST_GIT_NAME=""
+fi
+if [[ -z "$HOST_GIT_NAME" ]]; then
+  if ! HOST_GIT_NAME="$(git config --global user.name 2>/dev/null)"; then
+    HOST_GIT_NAME=""
+  fi
+fi
+
+HOST_GIT_EMAIL=""
+if ! HOST_GIT_EMAIL="$(git -C "$REPO" config user.email 2>/dev/null)"; then
+  HOST_GIT_EMAIL=""
+fi
+if [[ -z "$HOST_GIT_EMAIL" ]]; then
+  if ! HOST_GIT_EMAIL="$(git config --global user.email 2>/dev/null)"; then
+    HOST_GIT_EMAIL=""
+  fi
+fi
+
 # ------------------------------ host auth -----------------------------------
 
 HOST_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
@@ -243,6 +264,8 @@ podman run --rm -it \
   --network slirp4netns:allow_host_loopback=false \
   -e CODEX_HOME=$C_CODEX_HOME \
   -e CODEXBOX_BOOTSTRAP=$C_PROFILE_BOOTSTRAP \
+  -e CODEXBOX_GIT_NAME=$(printf '%q' "$HOST_GIT_NAME") \
+  -e CODEXBOX_GIT_EMAIL=$(printf '%q' "$HOST_GIT_EMAIL") \
   -v \"$REPO\":/src:ro,Z \
   -v \"$OUT\":/out:Z \
   -v \"$AUTH_IN_OUT\":\"$C_AUTH_SRC\":ro,Z \
