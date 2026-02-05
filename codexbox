@@ -205,7 +205,7 @@ echo "Bootstrap:  $PROFILE_BOOTSTRAP"
 
 # Fixed container paths
 C_WORKDIR="/tmp/codexworkspace"
-C_CODEX_HOME="/tmp/.codex"
+C_CODEX_HOME="/opt/codexbox-home"
 C_AUTH_SRC="/tmp/codex-auth/auth.json"
 
 echo "Repo (host):  $REPO"
@@ -219,7 +219,7 @@ CONTAINER_SCRIPT="$(cat <<'EOS'
 set -euo pipefail
 
 WORKDIR="/tmp/codexworkspace"
-CODEX_HOME_DIR="/tmp/.codex"
+CODEX_HOME_DIR="/opt/codexbox-home"
 AUTH_SRC="/tmp/codex-auth/auth.json"
 
 # Sanity: helper commands must exist

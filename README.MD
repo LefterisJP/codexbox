@@ -261,6 +261,23 @@ and point your profile at that image.
 
 ---
 
+## Agent defaults (global)
+
+codexbox bakes a global instruction file into the container image at:
+
+```
+/opt/codexbox-home/AGENTS.override.md
+```
+
+This is read by Codex before any repo-level `AGENTS.md`. Defaults are per-profile image:
+
+- base image: `agent-defaults/base/AGENTS.override.md`
+- rotki image: `agent-defaults/rotki/AGENTS.override.md`
+
+Edit the appropriate file, then rebuild the image to update defaults.
+
+---
+
 ## Iterative workflow (mid-session sync, including new/untracked files)
 
 codexbox creates a shared bare git repo at:

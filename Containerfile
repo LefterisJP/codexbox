@@ -15,6 +15,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Codex CLI (common for all profiles)
 RUN npm i -g @openai/codex
 
+# Codexbox global instruction seed (read before repo-level AGENTS)
+ENV CODEX_HOME=/opt/codexbox-home
+COPY agent-defaults/base/AGENTS.override.md /opt/codexbox-home/AGENTS.override.md
+RUN chown -R node:node /opt/codexbox-home
+
 WORKDIR /home/node
 ENV PATH="/home/node/.cargo/bin:/usr/local/bin:/home/node/.local/bin:${PATH}"
 USER node
@@ -36,3 +41,9 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
 USER node
 # Latest Rust toolchain for Ruff + custom tools (install under node home)
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
+
+# Override agent defaults for rotki profile
+USER root
+COPY agent-defaults/rotki/AGENTS.override.md /opt/codexbox-home/AGENTS.override.md
+RUN chown -R node:node /opt/codexbox-home
+USER node
