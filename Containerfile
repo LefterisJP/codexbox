@@ -44,6 +44,10 @@ RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-too
 
 # Override agent defaults for rotki profile
 USER root
-COPY agent-defaults/rotki/AGENTS.override.md /opt/codexbox-home/AGENTS.override.md
+COPY agent-defaults/rotki/AGENTS.override.md /tmp/AGENTS.rotki.override.md
+# Append rotki defaults after base defaults so base applies first.
+RUN printf "\n\n" >> /opt/codexbox-home/AGENTS.override.md \
+  && cat /tmp/AGENTS.rotki.override.md >> /opt/codexbox-home/AGENTS.override.md \
+  && rm /tmp/AGENTS.rotki.override.md
 RUN chown -R node:node /opt/codexbox-home
 USER node
