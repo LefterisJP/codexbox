@@ -43,7 +43,8 @@ else
   echo "[cb-export] No staged changes; not creating a commit."
 fi
 
-# Push current HEAD to host branch "codex"
-git push -u host HEAD:codex
+# Push current HEAD to host branch named after the tool (default: codex)
+BRANCH="${CODEXBOX_TOOL:-codex}"
+git push -u host "HEAD:$BRANCH"
 
-echo "[cb-export] Exported to /out/host.git (branch: codex)"
+echo "[cb-export] Exported to /out/host.git (branch: $BRANCH)"

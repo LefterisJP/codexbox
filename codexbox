@@ -5,9 +5,10 @@ set -euo pipefail
 # codexbox: host entrypoint + subcommand dispatcher
 #
 # Usage:
-#   codexbox [--profile name] /path/to/repo [out_dir]    # run Codex container
-#   codexbox remote [path/to/repo]      # add/fetch host remote pointing to .codexbox-out/host.git
-#   codexbox pull   [path/to/repo]      # fetch + switch -C codexbox-work codexbox/codex
+#   codexbox [--profile name] [--tool codex|claude-code] /path/to/repo [out_dir]
+#   codexbox build               # build all container images
+#   codexbox remote [path/to/repo]
+#   codexbox pull   [path/to/repo]
 # ---------------------------------------------------------------------------
 
 CODEXBOX_HOME="${CODEXBOX_HOME:-$HOME/.codexbox}"
@@ -18,12 +19,14 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  codexbox [--profile name] /path/to/repo [out_dir]
+  codexbox [--profile name] [--tool codex|claude-code] /path/to/repo [out_dir]
+  codexbox build                Build all container images
   codexbox remote [path/to/repo]
   codexbox pull   [path/to/repo]
 
 Options:
-  --profile name    Choose profile (default: rotki). Can also set CODEXBOX_PROFILE env
+  --profile name                Choose profile (default: rotki). Can also set CODEXBOX_PROFILE env
+  --tool codex|claude-code      Choose AI tool (default: codex). Can also set CODEXBOX_TOOL env
 EOF
 }
 
@@ -32,6 +35,60 @@ EOF
 cmd="${1:-}"
 
 case "$cmd" in
+  build)
+    shift
+    CONTAINERFILE="$CODEXBOX_HOME/Containerfile"
+    [[ -f "$CONTAINERFILE" ]] || die "Containerfile not found at: $CONTAINERFILE"
+
+    # Extract all final build targets from the Containerfile (skip intermediate stages
+    # like 'base' and 'rotki-toolchain' that are only used as parents by other stages).
+    # A stage is intermediate if another FROM references it; final targets are the rest.
+    ALL_STAGES=()
+    PARENT_STAGES=()
+    while IFS= read -r line; do
+      if [[ "$line" =~ ^FROM[[:space:]]+.*[[:space:]]AS[[:space:]]+([a-zA-Z0-9_-]+) ]]; then
+        stage="${BASH_REMATCH[1]}"
+        ALL_STAGES+=("$stage")
+      fi
+      if [[ "$line" =~ ^FROM[[:space:]]+([a-zA-Z0-9_-]+)[[:space:]]+AS ]]; then
+        PARENT_STAGES+=("${BASH_REMATCH[1]}")
+      fi
+    done < "$CONTAINERFILE"
+
+    TARGETS=()
+    for stage in "${ALL_STAGES[@]}"; do
+      is_parent=false
+      for parent in "${PARENT_STAGES[@]}"; do
+        if [[ "$stage" == "$parent" ]]; then
+          is_parent=true
+          break
+        fi
+      done
+      if ! $is_parent; then
+        TARGETS+=("$stage")
+      fi
+    done
+
+    if [[ ${#TARGETS[@]} -eq 0 ]]; then
+      die "No build targets found in $CONTAINERFILE"
+    fi
+
+    echo "Building all container targets:"
+    for target in "${TARGETS[@]}"; do
+      echo "  codexbox:$target"
+    done
+    echo
+
+    for target in "${TARGETS[@]}"; do
+      echo "=== Building codexbox:$target ==="
+      podman build -t "codexbox:$target" -f "$CONTAINERFILE" --target "$target" "$CODEXBOX_HOME" \
+        || die "Failed to build target: $target"
+      echo
+    done
+
+    echo "All images built successfully."
+    exit 0
+    ;;
   remote)
     shift
     [[ -x "$BIN_DIR/cb-remote" ]] || die "Missing or non-executable: $BIN_DIR/cb-remote"
@@ -52,6 +109,7 @@ esac
 # ------------------------------ args ----------------------------------------
 
 PROFILE_OVERRIDE=""
+TOOL_OVERRIDE=""
 POSITIONAL=()
 
 while [[ $# -gt 0 ]]; do
@@ -65,6 +123,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --profile=*)
       PROFILE_OVERRIDE="${1#*=}"
+      shift
+      continue
+      ;;
+    --tool)
+      shift
+      [[ $# -gt 0 ]] || die "--tool requires a value (codex or claude-code)"
+      TOOL_OVERRIDE="$1"
+      shift
+      continue
+      ;;
+    --tool=*)
+      TOOL_OVERRIDE="${1#*=}"
       shift
       continue
       ;;
@@ -99,6 +169,17 @@ REPO="$(realpath "$1")"
 OUT="${2:-$REPO/.codexbox-out}"
 mkdir -p "$OUT"
 
+# ------------------------------ tool selection --------------------------------
+
+TOOL_NAME="$TOOL_OVERRIDE"
+[[ -z "$TOOL_NAME" ]] && TOOL_NAME="${CODEXBOX_TOOL:-}"
+TOOL_NAME="${TOOL_NAME:-codex}"
+
+case "$TOOL_NAME" in
+  codex|claude-code) ;;
+  *) die "Unknown tool '$TOOL_NAME'. Supported: codex, claude-code" ;;
+esac
+
 # Capture host git identity so the container inherits it
 HOST_GIT_NAME=""
 if ! HOST_GIT_NAME="$(git -C "$REPO" config user.name 2>/dev/null)"; then
@@ -122,14 +203,85 @@ fi
 
 # ------------------------------ host auth -----------------------------------
 
-HOST_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
-HOST_AUTH="$HOST_CODEX_HOME/auth.json"
-[[ -f "$HOST_AUTH" ]] || die "Can't find auth.json at: $HOST_AUTH (run: codex login)"
+AUTH_IN_OUT=""
 
-# Copy auth.json into outbox so we only mount that file
-AUTH_IN_OUT="$OUT/auth.json"
-cp -f "$HOST_AUTH" "$AUTH_IN_OUT"
-chmod 600 "$AUTH_IN_OUT"
+if [[ "$TOOL_NAME" == "codex" ]]; then
+  HOST_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+  HOST_AUTH="$HOST_CODEX_HOME/auth.json"
+  [[ -f "$HOST_AUTH" ]] || die "Can't find auth.json at: $HOST_AUTH (run: codex login)"
+
+  AUTH_IN_OUT="$OUT/auth.json"
+  cp -f "$HOST_AUTH" "$AUTH_IN_OUT"
+  chmod 600 "$AUTH_IN_OUT"
+else
+  # claude-code: The npm-installed version in the container reads credentials
+  # from $HOME/.claude.json (note: at $HOME root, NOT inside ~/.claude/).
+  # The host native binary stores OAuth tokens in ~/.claude/.credentials.json
+  # and onboarding state in ~/.claude.json at $HOME root.
+  #
+  # We need to merge OAuth tokens into the onboarding state file so the
+  # container's Claude Code finds both in $HOME/.claude.json.
+  HOST_CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
+  HOST_CLAUDE_STATE="$HOME/.claude.json"
+  HOST_CLAUDE_CREDS="$HOST_CLAUDE_HOME/.credentials.json"
+
+  # Find OAuth credentials from either location
+  if [[ -f "$HOST_CLAUDE_CREDS" ]]; then
+    CREDS_FILE="$HOST_CLAUDE_CREDS"
+  elif [[ -f "$HOST_CLAUDE_STATE" ]] && python3 -c "import json; d=json.load(open('$HOST_CLAUDE_STATE')); assert 'claudeAiOauth' in d" 2>/dev/null; then
+    CREDS_FILE=""  # already in the state file
+  else
+    die "Can't find Claude credentials. Run: claude login"
+  fi
+
+  CLAUDE_STAGE_DIR="$OUT/claude-config"
+  mkdir -p "$CLAUDE_STAGE_DIR"
+
+  # Build the merged .claude.json for the container
+  python3 -c "
+import json, sys
+
+# Load onboarding state (has theme, hasCompletedOnboarding, etc.)
+state = {}
+state_file = '$HOST_CLAUDE_STATE'
+try:
+    with open(state_file) as f:
+        state = json.load(f)
+except FileNotFoundError:
+    # Minimal state to skip setup wizard
+    state = {'hasCompletedOnboarding': True, 'numStartups': 1}
+
+# Merge OAuth tokens if stored separately
+creds_file = '$CREDS_FILE'
+if creds_file:
+    with open(creds_file) as f:
+        creds = json.load(f)
+    if 'claudeAiOauth' in creds:
+        state['claudeAiOauth'] = creds['claudeAiOauth']
+
+# Ensure onboarding is marked complete
+state.setdefault('hasCompletedOnboarding', True)
+
+with open('$CLAUDE_STAGE_DIR/.claude.json', 'w') as f:
+    json.dump(state, f)
+" || die "Failed to build Claude credentials for container"
+
+  chmod 600 "$CLAUDE_STAGE_DIR/.claude.json"
+
+  # Extract access token for CLAUDE_CODE_OAUTH_TOKEN env var (primary auth mechanism)
+  CLAUDE_OAUTH_TOKEN="$(python3 -c "
+import json
+with open('$CLAUDE_STAGE_DIR/.claude.json') as f:
+    d = json.load(f)
+print(d.get('claudeAiOauth', {}).get('accessToken', ''))
+")" || die "Failed to extract OAuth token"
+  [[ -n "$CLAUDE_OAUTH_TOKEN" ]] || die "No OAuth access token found. Run: claude login"
+
+  # Copy settings if available
+  if [[ -f "$HOST_CLAUDE_HOME/settings.json" ]]; then
+    cp -f "$HOST_CLAUDE_HOME/settings.json" "$CLAUDE_STAGE_DIR/settings.json"
+  fi
+fi
 
 # ------------------------- helpers to mount into container ------------------
 
@@ -198,6 +350,7 @@ for arg in "${PROFILE_PODMAN_OPTS[@]}"; do
 done
 
 echo "Profile:    $PROFILE_NAME"
+echo "Tool:       $TOOL_NAME"
 echo "Image:      $PROFILE_IMAGE"
 echo "Bootstrap:  $PROFILE_BOOTSTRAP"
 
@@ -206,21 +359,30 @@ echo "Bootstrap:  $PROFILE_BOOTSTRAP"
 # Fixed container paths
 C_WORKDIR="/tmp/codexworkspace"
 C_CODEX_HOME="/opt/codexbox-home"
-C_AUTH_SRC="/tmp/codex-auth/auth.json"
+C_CLAUDE_HOME="/home/node/.claude"
+
+if [[ "$TOOL_NAME" == "codex" ]]; then
+  C_AUTH_SRC="/tmp/codex-auth/auth.json"
+fi
+
+# Pre-flight: verify the container image exists
+if ! podman image exists "$PROFILE_IMAGE" 2>/dev/null; then
+  die "Container image '$PROFILE_IMAGE' not found. Build it first (see Containerfile comments for build commands)."
+fi
 
 echo "Repo (host):  $REPO"
 echo "Out dir:      $OUT"
 echo "Log file:     $LOG"
 echo
 
-# Minimal container script: prep auth, clone, bootstrap, then run Codex.
+# Minimal container script: prep auth, clone, bootstrap, then run the AI tool.
 # No fancy quoting tricks inside; we use a single-quoted heredoc and pass it safely.
+# CODEXBOX_TOOL is passed as an env var so the script knows which tool to launch.
 CONTAINER_SCRIPT="$(cat <<'EOS'
 set -euo pipefail
 
 WORKDIR="/tmp/codexworkspace"
-CODEX_HOME_DIR="/opt/codexbox-home"
-AUTH_SRC="/tmp/codex-auth/auth.json"
+TOOL="${CODEXBOX_TOOL:-codex}"
 
 # Sanity: helper commands must exist
 if ! command -v cb-export >/dev/null 2>&1; then
@@ -229,9 +391,39 @@ if ! command -v cb-export >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "$CODEX_HOME_DIR"
-cp -f "$AUTH_SRC" "$CODEX_HOME_DIR/auth.json"
-chmod 600 "$CODEX_HOME_DIR/auth.json"
+# Set up auth based on tool
+if [[ "$TOOL" == "codex" ]]; then
+  CODEX_HOME_DIR="/opt/codexbox-home"
+  AUTH_SRC="/tmp/codex-auth/auth.json"
+  mkdir -p "$CODEX_HOME_DIR"
+  cp -f "$AUTH_SRC" "$CODEX_HOME_DIR/auth.json"
+  chmod 600 "$CODEX_HOME_DIR/auth.json"
+else
+  # Copy global instructions from the image if available.
+  CLAUDE_HOME_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_HOME_DIR"
+  if [[ -f /opt/claude-home/CLAUDE.md ]]; then
+    cp -f /opt/claude-home/CLAUDE.md "$CLAUDE_HOME_DIR/CLAUDE.md"
+  fi
+
+  # Pre-trust the workspace and mark onboarding complete in .claude.json
+  # so Claude Code doesn't prompt for trust or permissions interactively.
+  python3 -c "
+import json
+state_file = '$HOME/.claude.json'
+with open(state_file) as f:
+    state = json.load(f)
+state.setdefault('projects', {})
+state['projects']['$WORKDIR'] = {
+    'hasTrustDialogAccepted': True,
+    'hasCompletedProjectOnboarding': True,
+    'allowedTools': [],
+}
+state['bypassPermissionsModeAccepted'] = True
+with open(state_file, 'w') as f:
+    json.dump(state, f)
+"
+fi
 
 rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR"
@@ -251,24 +443,44 @@ git init --bare /out/host.git 2>/dev/null || true
 git remote add host /out/host.git 2>/dev/null || true
 
 echo "[codexbox] Ready. Use: cb-export \"msg\" to sync to host."
-exec codex --dangerously-bypass-approvals-and-sandbox
+
+if [[ "$TOOL" == "codex" ]]; then
+  exec codex --dangerously-bypass-approvals-and-sandbox
+else
+  exec claude --dangerously-skip-permissions
+fi
 EOS
 )"
 
-# Keep Codex interactive while logging
+# Build tool-specific env vars and mounts for podman
+TOOL_PODMAN_ARGS=""
+TOOL_PODMAN_MOUNTS=""
+if [[ "$TOOL_NAME" == "codex" ]]; then
+  TOOL_PODMAN_ARGS="-e CODEX_HOME=$C_CODEX_HOME"
+else
+  # Pass OAuth token via env var (primary auth) and mount .claude.json for token refresh.
+  # Override CLAUDE_CONFIG_DIR to empty so the npm version falls back to $HOME
+  # (the image may have it set to /opt/claude-home which would look in the wrong place).
+  TOOL_PODMAN_ARGS="-e CLAUDE_CODE_OAUTH_TOKEN=$(printf '%q' "$CLAUDE_OAUTH_TOKEN") -e CLAUDE_CONFIG_DIR="
+  TOOL_PODMAN_MOUNTS="-v $(printf '%q' "$CLAUDE_STAGE_DIR/.claude.json"):/home/node/.claude.json:Z"
+fi
+
+# Keep the tool interactive while logging
 script -q -f -c "
 podman run --rm -it \
   --security-opt=no-new-privileges \
   --cap-drop=all \
   --userns=keep-id \
   --network slirp4netns:allow_host_loopback=false \
-  -e CODEX_HOME=$C_CODEX_HOME \
+  $TOOL_PODMAN_ARGS \
+  -e CODEXBOX_TOOL=$(printf '%q' "$TOOL_NAME") \
   -e CODEXBOX_BOOTSTRAP=$C_PROFILE_BOOTSTRAP \
   -e CODEXBOX_GIT_NAME=$(printf '%q' "$HOST_GIT_NAME") \
   -e CODEXBOX_GIT_EMAIL=$(printf '%q' "$HOST_GIT_EMAIL") \
   -v \"$REPO\":/src:ro,Z \
   -v \"$OUT\":/out:Z \
-  -v \"$AUTH_IN_OUT\":\"$C_AUTH_SRC\":ro,Z \
+  ${AUTH_IN_OUT:+-v \"$AUTH_IN_OUT\":\"$C_AUTH_SRC\":ro,Z} \
+  $TOOL_PODMAN_MOUNTS \
   -v \"$HOST_CB_EXPORT\":/usr/local/bin/cb-export:ro,Z \
   -v \"$HOST_CB_IMPORT\":/usr/local/bin/cb-import:ro,Z \
   -v \"$PROFILE_BOOTSTRAP\":\"$C_PROFILE_BOOTSTRAP\":ro,Z \

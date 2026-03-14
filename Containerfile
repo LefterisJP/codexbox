@@ -12,42 +12,84 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep less \
   && rm -rf /var/lib/apt/lists/*
 
-# Codex CLI (common for all profiles)
+WORKDIR /home/node
+ENV PATH="/home/node/.cargo/bin:/usr/local/bin:/home/node/.local/bin:${PATH}"
+
+# ===========================================================================
+# Codex base: installs Codex CLI + AGENTS.override.md
+# Build: podman build -t codexbox:base-codex -f Containerfile --target base-codex
+# ===========================================================================
+FROM base AS base-codex
+
 RUN npm i -g @openai/codex
 
-# Codexbox global instruction seed (read before repo-level AGENTS)
 ENV CODEX_HOME=/opt/codexbox-home
 COPY agent-defaults/base/AGENTS.override.md /opt/codexbox-home/AGENTS.override.md
 RUN chown -R node:node /opt/codexbox-home
 
-WORKDIR /home/node
-ENV PATH="/home/node/.cargo/bin:/usr/local/bin:/home/node/.local/bin:${PATH}"
 USER node
 
-# ---------------------------------------------------------------------------
-# rotki profile: extends base with pnpm/corepack, uv and rustup
-# Build with: podman build -t codexbox:rotki -f Containerfile --target rotki
-# ---------------------------------------------------------------------------
-FROM base AS rotki
+# ===========================================================================
+# Claude Code base: installs Claude Code CLI + CLAUDE.md (same instruction content)
+# Build: podman build -t codexbox:base-claude -f Containerfile --target base-claude
+# ===========================================================================
+FROM base AS base-claude
+
+RUN npm i -g @anthropic-ai/claude-code
+
+# Stage global instructions at a known path; the container entrypoint
+# copies them to ~/.claude/CLAUDE.md at runtime.
+RUN mkdir -p /opt/claude-home
+COPY agent-defaults/base/AGENTS.override.md /opt/claude-home/CLAUDE.md
+RUN chown -R node:node /opt/claude-home
+
+USER node
+
+# ===========================================================================
+# rotki toolchain: shared stage with pnpm/corepack, uv and rustup
+# (not a final target — used by rotki and rotki-claude below)
+# ===========================================================================
+FROM base AS rotki-toolchain
 
 USER root
-# pnpm via corepack (rotki docs)
 RUN corepack enable
 
-# uv (rotki docs)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
   && install -m 0755 /root/.local/bin/uv /usr/local/bin/uv
 
 USER node
-# Latest Rust toolchain for Ruff + custom tools (install under node home)
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
 
-# Override agent defaults for rotki profile
+# ===========================================================================
+# rotki profile (Codex): rotki toolchain + Codex CLI
+# Build: podman build -t codexbox:rotki -f Containerfile --target rotki
+# ===========================================================================
+FROM rotki-toolchain AS rotki
+
 USER root
+RUN npm i -g @openai/codex
+ENV CODEX_HOME=/opt/codexbox-home
+COPY agent-defaults/base/AGENTS.override.md /opt/codexbox-home/AGENTS.override.md
 COPY agent-defaults/rotki/AGENTS.override.md /tmp/AGENTS.rotki.override.md
-# Append rotki defaults after base defaults so base applies first.
 RUN printf "\n\n" >> /opt/codexbox-home/AGENTS.override.md \
   && cat /tmp/AGENTS.rotki.override.md >> /opt/codexbox-home/AGENTS.override.md \
   && rm /tmp/AGENTS.rotki.override.md
 RUN chown -R node:node /opt/codexbox-home
+USER node
+
+# ===========================================================================
+# rotki profile (Claude Code): rotki toolchain + Claude Code CLI
+# Build: podman build -t codexbox:rotki-claude -f Containerfile --target rotki-claude
+# ===========================================================================
+FROM rotki-toolchain AS rotki-claude
+
+USER root
+RUN npm i -g @anthropic-ai/claude-code
+RUN mkdir -p /opt/claude-home
+COPY agent-defaults/base/AGENTS.override.md /opt/claude-home/CLAUDE.md
+COPY agent-defaults/rotki/AGENTS.override.md /tmp/AGENTS.rotki.override.md
+RUN printf "\n\n" >> /opt/claude-home/CLAUDE.md \
+  && cat /tmp/AGENTS.rotki.override.md >> /opt/claude-home/CLAUDE.md \
+  && rm /tmp/AGENTS.rotki.override.md
+RUN chown -R node:node /opt/claude-home
 USER node

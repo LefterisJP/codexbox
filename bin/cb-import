@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+BRANCH="${CODEXBOX_TOOL:-codex}"
+
 git remote get-url host >/dev/null 2>&1 || git remote add host /out/host.git
 git fetch host
 
-if ! git show-ref --verify --quiet refs/remotes/host/codex; then
-  echo "[cb-import] No host/codex branch yet."
+if ! git show-ref --verify --quiet "refs/remotes/host/$BRANCH"; then
+  echo "[cb-import] No host/$BRANCH branch yet."
   exit 0
 fi
 
 # Merge (safer than rebase for an agent)
-git merge --ff --no-edit host/codex || true
+git merge --ff --no-edit "host/$BRANCH" || true
 
-echo "[cb-import] Merged host/codex into current branch"
+echo "[cb-import] Merged host/$BRANCH into current branch"

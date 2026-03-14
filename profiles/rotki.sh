@@ -3,8 +3,15 @@
 PROFILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # rotki profile mirrors the original codexbox environment (Node + Python + uv + Rust)
-# Build the image with:
-#   podman build -t codexbox:rotki -f Containerfile --target rotki
-PROFILE_IMAGE="${PROFILE_IMAGE:-codexbox:rotki}"
+# Image depends on the selected tool:
+#   codex:       podman build -t codexbox:rotki        -f Containerfile --target rotki
+#   claude-code: podman build -t codexbox:rotki-claude -f Containerfile --target rotki-claude
+_TOOL="${TOOL_NAME:-codex}"
+if [[ "$_TOOL" == "claude-code" ]]; then
+  PROFILE_IMAGE="${PROFILE_IMAGE:-codexbox:rotki-claude}"
+else
+  PROFILE_IMAGE="${PROFILE_IMAGE:-codexbox:rotki}"
+fi
+
 PROFILE_BOOTSTRAP="${PROFILE_BOOTSTRAP:-$PROFILE_DIR/rotki-bootstrap.sh}"
 PROFILE_PODMAN_OPTS=()

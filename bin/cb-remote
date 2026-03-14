@@ -21,7 +21,8 @@ git fetch codexbox
 
 echo "[codexbox] Remote 'codexbox' is set."
 echo
-echo "To inspect Codex output:"
-echo "  git switch -C codexbox-work codexbox/codex"
+echo "To inspect agent output:"
+echo "  git switch -C codexbox-work codexbox/<tool-branch>"
+echo "  (branch name matches the tool: codex or claude-code)"
 echo
 echo "Then merge/cherry-pick as you like."

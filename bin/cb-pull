@@ -9,6 +9,17 @@ cd "$REPO"
 
 git remote add codexbox .codexbox-out/host.git 2>/dev/null || true
 git fetch codexbox
-git switch -C "$TARGET_BRANCH" codexbox/codex
 
-echo "[codexbox] Switched to $TARGET_BRANCH (latest Codex output)"
+# Try tool-specific branch, fall back to codex for backward compat
+if git show-ref --verify --quiet refs/remotes/codexbox/claude-code; then
+  TOOL_BRANCH="claude-code"
+elif git show-ref --verify --quiet refs/remotes/codexbox/codex; then
+  TOOL_BRANCH="codex"
+else
+  echo "[codexbox] No agent branch found in bridge repo."
+  exit 1
+fi
+
+git switch -C "$TARGET_BRANCH" "codexbox/$TOOL_BRANCH"
+
+echo "[codexbox] Switched to $TARGET_BRANCH (latest $TOOL_BRANCH output)"

@@ -1,35 +1,39 @@
 # codexbox
 
-Run OpenAI Codex **with full autonomy** on a codebase, **safely isolated** from your host system.
+Run AI coding agents **with full autonomy** on a codebase, **safely isolated** from your host system.
+
+Supports **OpenAI Codex** and **Claude Code** (Anthropic).
 
 This setup exists because:
 
-* Codex is most useful when it can run tools freely (`--dangerously-bypass-approvals-and-sandbox`)
+* Agents are most useful when they can run tools freely
 * Doing that directly on your host is unsafe
 * Containers give us a controlled blast radius without killing usefulness
 
-This is **not** about perfect security. It’s about **practical containment**.
+This is **not** about perfect security. It's about **practical containment**.
 
 ---
 
 ## What this does (high level)
 
-* Runs Codex inside a **rootless Podman container**
-* Gives Codex:
+* Runs an AI agent inside a **rootless Podman container**
+* Gives the agent:
 
   * full filesystem access *inside the container*
   * internet access (but **no LAN / localhost access**)
-  * all required dev tools for rotki (Python 3.11, uv, node, pnpm, etc.)
+  * all required dev tools for the profile (Python 3.11, uv, node, pnpm, etc.)
 * Protects the host by:
 
   * mounting the repo **read-only**
   * working on a cloned copy inside the container
-  * exporting changes as a **git patch** back to the host
+  * exporting changes via a **git bridge repo** back to the host
 
 Worst case:
 
 * the container filesystem gets nuked
-  Best case:
+
+Best case:
+
 * you get useful changes without babysitting approvals
 
 ---
@@ -38,20 +42,24 @@ Worst case:
 
 ```
 ~/.codexbox/
-├── bin/               # Helper commands mounted into the container
-├── Containerfile      # Builds multi-stage Codex dev containers
-├── codexbox           # Runner script (installed into /usr/local/bin)
-├── profiles/          # Built-in profiles + bootstrap hooks
-└── README.md          # This file
+├── agent-defaults/   # Shared instruction files for both tools
+│   ├── base/AGENTS.override.md
+│   └── rotki/AGENTS.override.md
+├── bin/              # Helper commands mounted into the container
+├── Containerfile     # Builds multi-stage containers for both tools
+├── codexbox          # Runner script (installed into /usr/local/bin)
+├── profiles/         # Built-in profiles + bootstrap hooks
+└── README.md         # This file
 ```
 
-Per-project, you’ll see:
+Per-project, you'll see:
 
 ```
 your-repo/
 └── .codexbox-out/
-    ├── auth.json                # copied OAuth token (scoped to this project)
-    ├── patch-YYYYMMDD-HHMMSS.diff
+    ├── auth.json                    # Codex OAuth token (when using codex)
+    ├── claude-config/               # Claude Code credentials (when using claude-code)
+    ├── host.git/                    # Shared git bridge repo
     └── run-YYYYMMDD-HHMMSS.log
 ```
 
@@ -68,7 +76,7 @@ sudo pacman -S --needed podman slirp4netns fuse-overlayfs git util-linux
 Make sure your user has subuids/subgids (required for rootless Podman):
 
 ```bash
-sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 lefteris
+sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER
 ```
 
 Log out & log back in (or reboot), then:
@@ -79,7 +87,9 @@ podman system migrate
 
 ---
 
-### 2) Authenticate Codex (OAuth)
+### 2) Authenticate your agent
+
+#### For Codex (OpenAI)
 
 Codex uses your **ChatGPT subscription**, not an API key.
 
@@ -87,56 +97,85 @@ Install Codex on the host (only for login):
 
 ```bash
 npm i -g @openai/codex
-```
-
-Login once:
-
-```bash
 codex login
 ```
 
-This creates:
+This creates `~/.codex/auth.json`, which `codexbox` copies per-project into the container.
 
-```
-~/.codex/auth.json
+#### For Claude Code (Anthropic)
+
+Install Claude Code on the host (only for login):
+
+```bash
+npm i -g @anthropic-ai/claude-code
+# or via your system package manager
+claude login
 ```
 
-`codexbox` will copy this file per-project and mount **only that file** into the container.
+`codexbox` reads your OAuth credentials from `~/.claude/.credentials.json` (or `~/.claude.json`)
+and passes them to the container via the `CLAUDE_CODE_OAUTH_TOKEN` environment variable. It also
+stages a `.claude.json` state file so the container skips first-time setup prompts.
 
 ---
 
-## Building the container
+## Building the containers
 
-From `~/.codexbox` build whichever stages you need:
+Build all images at once:
 
 ```bash
-# Minimal base image (git + codex CLI + basic toolchain)
-podman build -t codexbox:base -f Containerfile --target base
-
-# Full rotki profile (default) with Python, uv, pnpm, Rust…
-podman build -t codexbox:rotki -f Containerfile --target rotki
+codexbox build
 ```
 
-`codexbox:rotki` matches the original setup (Python 3.11, uv, node/corepack, pnpm,
-Rust/cargo, Codex CLI). `codexbox:base` is intentionally small and acts as the starting
-point for new project-specific images. If your tooling changes, update `Containerfile`
-(add a new stage if needed) and rebuild the relevant tag.
+This builds every final target in the Containerfile. You can also build individually:
+
+```bash
+# Codex images
+podman build -t codexbox:base-codex  -f Containerfile --target base-codex
+podman build -t codexbox:rotki       -f Containerfile --target rotki
+
+# Claude Code images
+podman build -t codexbox:base-claude -f Containerfile --target base-claude
+podman build -t codexbox:rotki-claude -f Containerfile --target rotki-claude
+```
+
+The Containerfile uses a shared `rotki-toolchain` intermediate stage so Python/uv/Rust
+layers are built once and shared between the Codex and Claude Code rotki images.
 
 ---
 
 ## Using codexbox
 
-From any repo checkout:
+### Basic usage
 
 ```bash
+# Run with Codex (default)
+codexbox .
+
+# Run with Claude Code
+codexbox --tool claude-code .
+```
+
+### Tool selection
+
+The `--tool` flag selects which agent to run. Supported values: `codex` (default), `claude-code`.
+
+```bash
+codexbox --tool claude-code .
+```
+
+You can also set it via environment variable:
+
+```bash
+export CODEXBOX_TOOL=claude-code
 codexbox .
 ```
 
-The default profile is **rotki**, so this behaves exactly like the original setup.
-Switch at runtime with `--profile <name>` or export `CODEXBOX_PROFILE=name`. Example:
+### Profile selection
+
+The default profile is **rotki**. Switch with `--profile <name>` or `CODEXBOX_PROFILE`:
 
 ```bash
-codexbox --profile default .
+codexbox --profile default --tool claude-code .
 ```
 
 Per-project defaults live in `<repo>/.codexbox/config`:
@@ -145,30 +184,20 @@ Per-project defaults live in `<repo>/.codexbox/config`:
 profile = default
 ```
 
-`codexbox` resolves the profile in this order: CLI flag → `CODEXBOX_PROFILE` env → repo
-config → `rotki`.
+Resolution order: CLI flag → `CODEXBOX_PROFILE` env → repo config → `rotki`.
 
-What happens:
+Profiles automatically select the correct container image based on the tool. For example,
+the `rotki` profile uses `codexbox:rotki` for Codex and `codexbox:rotki-claude` for Claude Code.
+
+### What happens
 
 1. Repo is mounted **read-only** at `/src`
 2. Repo is cloned into `/tmp/codexworkspace` inside the container
-3. Codex runs there with:
-
-   ```
-   --dangerously-bypass-approvals-and-sandbox
-   ```
+3. The agent runs with full autonomy:
+   * Codex: `--dangerously-bypass-approvals-and-sandbox`
+   * Claude Code: `--dangerously-skip-permissions`
 4. All changes stay inside the container
-5. A patch is written to:
-
-   ```
-   .codexbox-out/patch-<timestamp>.diff
-   ```
-
-Apply changes manually:
-
-```bash
-git apply .codexbox-out/patch-*.diff
-```
+5. Use `cb-export "message"` to sync changes back to the host
 
 ---
 
@@ -182,7 +211,7 @@ The container runs with:
 
 This means:
 
-* ✅ outbound internet (OpenAI, GitHub, package registries)
+* ✅ outbound internet (OpenAI/Anthropic APIs, GitHub, package registries)
 * ❌ no access to host `localhost`
 * ❌ no access to LAN (192.168.x.x, 10.x.x.x, etc.)
 
@@ -196,7 +225,7 @@ What this protects you from:
 
 * accidental `rm -rf` on your repo or home
 * wild file edits outside the workspace
-* most “oops” moments from autonomous agents
+* most "oops" moments from autonomous agents
 
 What it does **not** protect you from:
 
@@ -212,21 +241,20 @@ Rules:
 
 This setup puts you roughly at:
 
-> “running arbitrary build scripts from the internet”
+> "running arbitrary build scripts from the internet"
 > which is acceptable for serious dev work.
 
 ---
 
 ## Profiles & hooks
 
-`codexbox` now supports **profiles** so you can tailor the container + bootstrap logic per
+`codexbox` supports **profiles** so you can tailor the container + bootstrap logic per
 project while keeping rotki as the default.
 
 Built-in profiles live in `~/.codexbox/profiles/`:
 
-* `rotki` – default. Uses the `codexbox:rotki` image and runs the uv bootstrap hook used
-  historically.
-* `default` – minimal. Uses `codexbox:base` and a no-op bootstrap script.
+* `rotki` – default. Uses the rotki image and runs the uv bootstrap hook.
+* `default` – minimal. Uses the base image and a no-op bootstrap script.
 
 A profile file is just a shell script that sets:
 
@@ -236,14 +264,13 @@ PROFILE_BOOTSTRAP=/path/to/hook.sh   # mounted and executed after cloning the re
 PROFILE_PODMAN_OPTS=(--memory=8g)    # optional extra podman run flags
 ```
 
+Profiles auto-select the right image for the chosen tool (e.g. `codexbox:rotki` vs
+`codexbox:rotki-claude`). See `profiles/rotki.sh` for an example.
+
 The bootstrap script executes inside the cloned repo (`/tmp/codexworkspace`). To define a
 new profile, copy `profiles/default.sh` + `profiles/default-bootstrap.sh`, tweak them, and
 point them at your custom container stage (add one to `Containerfile` if needed). Make the
 scripts executable; `codexbox` mounts them automatically.
-
-Use `--profile name`, `CODEXBOX_PROFILE`, or `<repo>/.codexbox/config` to pick which
-profile runs. This lets you maintain different toolchains/limits/networking per project
-without editing the runner script.
 
 ---
 
@@ -256,29 +283,30 @@ PROFILE_PODMAN_OPTS=(--memory=8g --cpus=6 --pids-limit=2048)
 ```
 
 Offline mode? Add `--network none` there. Need extra system deps? Add a new stage to
-`Containerfile`, rebuild it (`podman build -t codexbox:myproj -f Containerfile --target myproj`),
-and point your profile at that image.
+`Containerfile`, rebuild it, and point your profile at that image.
 
 ---
 
 ## Agent defaults (global)
 
-codexbox bakes a global instruction file into the container image at:
+codexbox bakes a global instruction file into each container image:
+
+* **Codex**: reads `AGENTS.override.md` from `/opt/codexbox-home/`
+* **Claude Code**: the same content is placed as `CLAUDE.md` (at `/opt/claude-home/`,
+  copied to `~/.claude/CLAUDE.md` at runtime)
+
+Source files are shared — no duplication:
 
 ```
-/opt/codexbox-home/AGENTS.override.md
+agent-defaults/base/AGENTS.override.md    # base instructions (all profiles)
+agent-defaults/rotki/AGENTS.override.md   # rotki-specific additions
 ```
 
-This is read by Codex before any repo-level `AGENTS.md`. Defaults are per-profile image:
-
-- base image: `agent-defaults/base/AGENTS.override.md`
-- rotki image: `agent-defaults/rotki/AGENTS.override.md`
-
-Edit the appropriate file, then rebuild the image to update defaults.
+Edit the appropriate file, then rebuild the images (`codexbox build`) to update defaults.
 
 ---
 
-## Iterative workflow (mid-session sync, including new/untracked files)
+## Iterative workflow (mid-session sync)
 
 codexbox creates a shared bare git repo at:
 
@@ -287,36 +315,29 @@ codexbox creates a shared bare git repo at:
 
 Inside the container, two helper commands exist:
 
-- `cb-export "message"`: stages all files (including new ones), commits, pushes to host branch `codex`
-- `cb-import`: fetches `host/codex` and merges it into the current branch
+- `cb-export "message"`: stages all files (including new ones), commits, pushes to the host bridge repo
+- `cb-import`: fetches from the bridge repo and merges into the current branch
 
-### Pull changes onto the host (any time)
+The bridge branch name matches the tool (`codex` or `claude-code`), so you can run
+both tools on the same repo without conflicts.
 
-From the host, to check out what Codex exported:
-
-```bash
-git clone .codexbox-out/host.git /tmp/codex-export
-cd /tmp/codex-export
-git checkout codex
-
-## Host helpers
+### Host helpers
 
 codexbox provides host-side helpers as subcommands.
 
-### Set up / refresh the Codex remote
+#### Set up / refresh the remote
 
 ```bash
 codexbox remote
 ```
 
-Adds a git remote named codexbox pointing to .codexbox-out/host.git
-and fetches the latest changes.
+Adds a git remote named `codexbox` pointing to `.codexbox-out/host.git` and fetches.
 
-### Pull latest Codex changes into a branch
+#### Pull latest agent changes into a branch
 
 ```bash
 codexbox pull
 ```
 
-Creates/resets branch codexbox-work to the latest Codex output.
+Creates/resets branch `codexbox-work` to the latest agent output (auto-detects which tool branch exists).
 From there, merge or cherry-pick as desired.
