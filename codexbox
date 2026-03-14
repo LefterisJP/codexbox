@@ -225,19 +225,16 @@ else
   HOST_CLAUDE_STATE="$HOME/.claude.json"
   HOST_CLAUDE_CREDS="$HOST_CLAUDE_HOME/.credentials.json"
 
-  # Find OAuth credentials from either location
-  if [[ -f "$HOST_CLAUDE_CREDS" ]]; then
-    CREDS_FILE="$HOST_CLAUDE_CREDS"
-  elif [[ -f "$HOST_CLAUDE_STATE" ]] && python3 -c "import json; d=json.load(open('$HOST_CLAUDE_STATE')); assert 'claudeAiOauth' in d" 2>/dev/null; then
-    CREDS_FILE=""  # already in the state file
-  else
-    die "Can't find Claude credentials. Run: claude login"
-  fi
+  # OAuth tokens live in ~/.claude/.credentials.json
+  [[ -f "$HOST_CLAUDE_CREDS" ]] || die "Can't find Claude credentials at $HOST_CLAUDE_CREDS. Run: claude login"
 
   CLAUDE_STAGE_DIR="$OUT/claude-config"
   mkdir -p "$CLAUDE_STAGE_DIR"
 
-  # Build the merged .claude.json for the container
+  # Build .claude.json (onboarding state + account metadata).
+  # Claude Code reads OAuth tokens from ~/.claude/.credentials.json, NOT from
+  # ~/.claude.json. The state file just needs oauthAccount (account metadata)
+  # and onboarding flags.
   python3 -c "
 import json, sys
 
@@ -248,34 +245,23 @@ try:
     with open(state_file) as f:
         state = json.load(f)
 except FileNotFoundError:
-    # Minimal state to skip setup wizard
-    state = {'hasCompletedOnboarding': True, 'numStartups': 1}
-
-# Merge OAuth tokens if stored separately
-creds_file = '$CREDS_FILE'
-if creds_file:
-    with open(creds_file) as f:
-        creds = json.load(f)
-    if 'claudeAiOauth' in creds:
-        state['claudeAiOauth'] = creds['claudeAiOauth']
+    state = {}
 
 # Ensure onboarding is marked complete
 state.setdefault('hasCompletedOnboarding', True)
+state.setdefault('numStartups', 1)
 
 with open('$CLAUDE_STAGE_DIR/.claude.json', 'w') as f:
     json.dump(state, f)
-" || die "Failed to build Claude credentials for container"
+" || die "Failed to build Claude state for container"
 
   chmod 600 "$CLAUDE_STAGE_DIR/.claude.json"
 
-  # Extract access token for CLAUDE_CODE_OAUTH_TOKEN env var (primary auth mechanism)
-  CLAUDE_OAUTH_TOKEN="$(python3 -c "
-import json
-with open('$CLAUDE_STAGE_DIR/.claude.json') as f:
-    d = json.load(f)
-print(d.get('claudeAiOauth', {}).get('accessToken', ''))
-")" || die "Failed to extract OAuth token"
-  [[ -n "$CLAUDE_OAUTH_TOKEN" ]] || die "No OAuth access token found. Run: claude login"
+  # Stage .credentials.json (OAuth tokens with refreshToken) from the host.
+  # This gets mounted at a temp path and copied into ~/.claude/ by the
+  # container script (to avoid podman creating ~/.claude/ as root).
+  cp -f "$HOST_CLAUDE_CREDS" "$CLAUDE_STAGE_DIR/.credentials.json"
+  chmod 600 "$CLAUDE_STAGE_DIR/.credentials.json"
 
   # Copy settings if available
   if [[ -f "$HOST_CLAUDE_HOME/settings.json" ]]; then
@@ -399,11 +385,17 @@ if [[ "$TOOL" == "codex" ]]; then
   cp -f "$AUTH_SRC" "$CODEX_HOME_DIR/auth.json"
   chmod 600 "$CODEX_HOME_DIR/auth.json"
 else
-  # Copy global instructions from the image if available.
+  # Set up ~/.claude directory with instructions and credentials.
   CLAUDE_HOME_DIR="$HOME/.claude"
   mkdir -p "$CLAUDE_HOME_DIR"
   if [[ -f /opt/claude-home/CLAUDE.md ]]; then
     cp -f /opt/claude-home/CLAUDE.md "$CLAUDE_HOME_DIR/CLAUDE.md"
+  fi
+
+  # Copy OAuth credentials from temp mount into the proper location.
+  if [[ -f /tmp/claude-credentials.json ]]; then
+    cp -f /tmp/claude-credentials.json "$CLAUDE_HOME_DIR/.credentials.json"
+    chmod 600 "$CLAUDE_HOME_DIR/.credentials.json"
   fi
 
   # Pre-trust the workspace and mark onboarding complete in .claude.json
@@ -458,11 +450,14 @@ TOOL_PODMAN_MOUNTS=""
 if [[ "$TOOL_NAME" == "codex" ]]; then
   TOOL_PODMAN_ARGS="-e CODEX_HOME=$C_CODEX_HOME"
 else
-  # Pass OAuth token via env var (primary auth) and mount .claude.json for token refresh.
-  # Override CLAUDE_CONFIG_DIR to empty so the npm version falls back to $HOME
-  # (the image may have it set to /opt/claude-home which would look in the wrong place).
-  TOOL_PODMAN_ARGS="-e CLAUDE_CODE_OAUTH_TOKEN=$(printf '%q' "$CLAUDE_OAUTH_TOKEN") -e CLAUDE_CONFIG_DIR="
-  TOOL_PODMAN_MOUNTS="-v $(printf '%q' "$CLAUDE_STAGE_DIR/.claude.json"):/home/node/.claude.json:Z"
+  # Mount .claude.json (onboarding state) and .credentials.json (OAuth tokens with
+  # refresh token) so Claude Code can manage its own token lifecycle.
+  # NOTE: Do NOT set CLAUDE_CONFIG_DIR="" — the ?? operator in Claude Code treats
+  # empty string as a valid value, breaking credential path resolution.
+  TOOL_PODMAN_ARGS=""
+  # Mount .claude.json at $HOME and .credentials.json at a temp path.
+  # The container script copies credentials into ~/.claude/ after mkdir.
+  TOOL_PODMAN_MOUNTS="-v $(printf '%q' "$CLAUDE_STAGE_DIR/.claude.json"):/home/node/.claude.json:Z -v $(printf '%q' "$CLAUDE_STAGE_DIR/.credentials.json"):/tmp/claude-credentials.json:ro,Z"
 fi
 
 # Keep the tool interactive while logging
