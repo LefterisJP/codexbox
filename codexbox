@@ -422,6 +422,14 @@ mkdir -p "$WORKDIR"
 git clone --no-hardlinks /src "$WORKDIR"
 cd "$WORKDIR"
 
+# Set git identity so that tools (Claude, Codex) can commit directly.
+if [[ -n "${CODEXBOX_GIT_NAME:-}" ]]; then
+  git config user.name "$CODEXBOX_GIT_NAME"
+fi
+if [[ -n "${CODEXBOX_GIT_EMAIL:-}" ]]; then
+  git config user.email "$CODEXBOX_GIT_EMAIL"
+fi
+
 BOOTSTRAP_SCRIPT="${CODEXBOX_BOOTSTRAP:-/usr/local/bin/cb-profile-bootstrap}"
 if [[ -x "$BOOTSTRAP_SCRIPT" ]]; then
   echo "[codexbox] Running profile bootstrap: $BOOTSTRAP_SCRIPT"
