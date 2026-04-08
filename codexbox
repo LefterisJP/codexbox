@@ -398,6 +398,21 @@ else
     chmod 600 "$CLAUDE_HOME_DIR/.credentials.json"
   fi
 
+  # Ensure settings.json has bypassPermissions as defaultMode so the
+  # --dangerously-skip-permissions confirmation prompt is auto-accepted.
+  python3 -c "
+import json, os
+settings_path = os.path.join('$CLAUDE_HOME_DIR', 'settings.json')
+settings = {}
+if os.path.exists(settings_path):
+    with open(settings_path) as f:
+        settings = json.load(f)
+settings['defaultMode'] = 'bypassPermissions'
+settings['skipDangerousModePermissionPrompt'] = True
+with open(settings_path, 'w') as f:
+    json.dump(settings, f)
+"
+
   # Pre-trust the workspace and mark onboarding complete in .claude.json
   # so Claude Code doesn't prompt for trust or permissions interactively.
   python3 -c "
@@ -447,7 +462,7 @@ echo "[codexbox] Ready. Use: cb-export \"msg\" to sync to host."
 if [[ "$TOOL" == "codex" ]]; then
   exec codex --dangerously-bypass-approvals-and-sandbox
 else
-  exec claude --dangerously-skip-permissions
+  exec npx -y @anthropic-ai/claude-code@latest --dangerously-skip-permissions
 fi
 EOS
 )"
