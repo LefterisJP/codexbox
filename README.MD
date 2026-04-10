@@ -67,7 +67,16 @@ your-repo/
 
 ## One-time setup (host)
 
-### 1) Install Podman (Arch)
+### 1) Install codexbox
+
+```bash
+git clone <repo-url> ~/.codexbox
+sudo ln -s ~/.codexbox/codexbox /usr/local/bin/codexbox
+```
+
+This places the `codexbox` script in your PATH. The script lives in the repo itself, so pulling updates is all you need to stay current.
+
+### 2) Install Podman (Arch)
 
 ```bash
 sudo pacman -S --needed podman slirp4netns fuse-overlayfs git util-linux
@@ -87,7 +96,7 @@ podman system migrate
 
 ---
 
-### 2) Authenticate your agent
+### 3) Authenticate your agent
 
 #### For Codex (OpenAI)
 
